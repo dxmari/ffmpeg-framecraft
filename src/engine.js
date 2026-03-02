@@ -202,7 +202,6 @@ class FramecraftEngine {
           duration: slice.transition?.duration ? slice.transition.duration : defaultTransition.duration,
         }
         transition = getTransition(transitionConfig);
-        console.log('transition', transition);
       }
 
       return { startSeconds, endSeconds, transition };

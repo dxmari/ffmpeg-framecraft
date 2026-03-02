@@ -1,6 +1,7 @@
 const path = require('path');
 
 const { FramecraftEngine } = require('..');
+const { PRESETS: TRANSITION_PRESETS } = require('../src/presets/transitions');
 const engine = new FramecraftEngine();
 
 const inputPath = path.join(__dirname, '../example/media/sample.mp4');
@@ -26,8 +27,8 @@ const slicesWithTransitions = async () => {
   engine.compose(inputPath, outputPath, [
     { op: 'slicesWithTransitions', slices: [
       { start: 18, end: 28 },
-      { start: 86, end: 98, transition: { type: 'dissolve', duration: 1 } },
-      { start: 207, end: 219, transition: { type: 'distance', duration: 1 } },
+      { start: 86, end: 98, transition: TRANSITION_PRESETS.fadeLong },
+      { start: 207, end: 219, transition: TRANSITION_PRESETS.fadeLong },
     ], preset: 'youtubeShort' },
   ], {
     onProgress: (p) => {

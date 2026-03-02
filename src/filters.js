@@ -145,7 +145,7 @@ function buildSlicesWithTransitionsFilter(slices, hasAudio = true) {
     );
     if (hasAudio) {
       parts.push(
-        `[${prevA}][${nextA}]acrossfade=d=${t}:c1=tri:c2=tri[${outA}]`
+        `[${prevA}][${nextA}]acrossfade=d=${t}:c1=qsin:c2=qsin[${outA}]`
       );
     }
 

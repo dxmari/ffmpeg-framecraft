@@ -47,17 +47,10 @@ If the binaries are not in `PATH`, set:
 ## Installation
 
 ```bash
-cd shared/video_tool
-npm install
+npm install ffmpeg-framecraft
 ```
 
-From another package in the repo:
-
-```javascript
-const { FramecraftEngine } = require('../shared/video_tool');
-```
-
-Or when installed as a dependency:
+Then:
 
 ```javascript
 const { FramecraftEngine } = require('ffmpeg-framecraft');
