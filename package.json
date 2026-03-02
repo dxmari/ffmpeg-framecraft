@@ -1,0 +1,62 @@
+{
+  "name": "ffmpeg-framecraft",
+  "version": "1.0.0",
+  "description": "FFmpeg-based video processing: crop, slice, transitions, subtitles, audio extraction",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "files": [
+    "LICENSE",
+    "README.md",
+    "index.js",
+    "src/"
+  ],
+  "keywords": [
+    "ffmpeg",
+    "video",
+    "crop",
+    "slice",
+    "transitions",
+    "subtitles",
+    "9:16",
+    "shorts",
+    "reels",
+    "tiktok",
+    "framecraft",
+    "video processing",
+    "video editing",
+    "video manipulation",
+    "video transformation",
+    "video conversion",
+    "video compression",
+    "video optimization",
+    "video enhancement",
+    "video enhancement",
+    "instagram reels",
+    "youtube shorts",
+    "tiktok shorts",
+    "tiktok videos",
+    "youtube videos",
+    "youtube shorts",
+    "tiktok shorts",
+    "tiktok videos",
+    "youtube videos"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "homepage": "https://github.com/dxmari/ffmpeg-framecraft#readme",
+  "bugs": {
+    "url": "https://github.com/dxmari/ffmpeg-framecraft/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dxmari/ffmpeg-framecraft.git"
+  },
+  "author": "Mariselvam",
+  "license": "ISC",
+  "dependencies": {
+    "fluent-ffmpeg": "^2.1.3"
+  }
+}
