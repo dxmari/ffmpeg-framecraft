@@ -104,12 +104,51 @@ async function composeShorts(engineInstance, inputPath, outputPath, options = {}
   }
 }
 
+/**
+ * Compose a YouTube Shorts-style highlight.
+ * Thin wrapper around composeShorts with preset defaulted to 'youtubeShort'.
+ */
+async function composeYoutubeShort(engineInstance, inputPath, outputPath, options = {}) {
+  await composeShorts(engineInstance, inputPath, outputPath, {
+    preset: 'youtubeShort',
+    ...options,
+  });
+}
+
+/**
+ * Compose an Instagram Reels-style highlight.
+ * Uses the 'instagramReels' platform preset by default.
+ */
+async function composeReels(engineInstance, inputPath, outputPath, options = {}) {
+  await composeShorts(engineInstance, inputPath, outputPath, {
+    preset: 'instagramReels',
+    ...options,
+  });
+}
+
+/**
+ * Compose a TikTok-style highlight.
+ * Uses the 'tiktok' platform preset by default.
+ */
+async function composeTiktok(engineInstance, inputPath, outputPath, options = {}) {
+  await composeShorts(engineInstance, inputPath, outputPath, {
+    preset: 'tiktok',
+    ...options,
+  });
+}
+
 const MEDIA_PRESETS = {
   composeShorts,
+  composeYoutubeShort,
+  composeReels,
+  composeTiktok,
 };
 
 module.exports = {
   MEDIA_PRESETS,
   composeShorts,
+  composeYoutubeShort,
+  composeReels,
+  composeTiktok,
 };
 

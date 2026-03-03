@@ -1,3 +1,5 @@
+const { MEDIA_PRESETS } = require('./media');
+
 /**
  * Platform and workflow presets for video processing.
  * Use these with FramecraftEngine for consistent output across YouTube Shorts, TikTok, etc.
@@ -102,4 +104,5 @@ module.exports = {
   shortsPresetConfig,
   PLATFORM_PRESETS,
   getPreset,
+  MEDIA_PRESETS,
 };

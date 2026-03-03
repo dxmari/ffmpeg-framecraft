@@ -19,6 +19,7 @@ A Node.js-friendly FFmpeg toolkit for video processing: crop to 9:16, slice by t
   - [Extract audio only](#7-extract-audio-only)
 - [Pipelines (compose)](#pipelines-compose)
 - [Platform presets](#platform-presets)
+- [Media presets (shorts/reels/tiktok)](#media-presets-shortsreelstiktok)
 - [Transition presets](#transition-presets)
 - [Progress reporting](#progress-reporting)
 - [API reference](#api-reference)
@@ -100,7 +101,8 @@ Converts horizontal video to vertical (9:16) and scales to **720×1280** (baseli
 | `inputPath`   | string | Source video path |
 | `outputPath`  | string | Output path (e.g. `.mp4`) |
 | `opts.onProgress` | function | `(progress) => {}`; `progress.percent` is 0–100 |
-| `opts.smart` | boolean | Enable smart (dynamic) crop (default: `false`) |
+| `opts.quality` | `'fast' \| 'balanced' \| 'high'` | Encoding quality preset. `balanced` is default; `high` uses lower CRF and slower x264 preset. |
+| `opts.smart` | boolean | Enable smart (dynamic) crop (default: `false` = static centered crop) |
 | `opts.smartSampleEvery` | number | Seconds between analysis samples (default: `0.25`) |
 | `opts.smartTwoShot` | boolean | When 2+ people are present, keep both in-frame if possible (default: `true`) |
 | `opts.smartSpeakerBias` | boolean | Bias framing toward the speaking person (heuristic) (default: `true`) |
@@ -392,6 +394,88 @@ console.log(getPreset('tiktok').aspectRatio); // '9:16'
 await engine.slicesWithTransitions('input.mp4', 'out.mp4', {
   slices: [...],
   preset: 'youtubeShort',
+});
+```
+
+---
+
+## Media presets (shorts/reels/tiktok)
+
+On top of the low-level engine methods and platform presets, `ffmpeg-framecraft` exposes **media presets** that build common workflows using `engine.compose`:
+
+- **`composeShorts(engine, inputPath, outputPath, options)`**
+- **`composeYoutubeShort(engine, inputPath, outputPath, options)`**
+- **`composeReels(engine, inputPath, outputPath, options)`**
+- **`composeTiktok(engine, inputPath, outputPath, options)`**
+
+These helpers:
+
+- Build a **highlight first** from the source (slices + transitions + optional subtitles/music).
+- Then apply the chosen **crop mode** on the final cut (static, smart, or AutoCrop-vertical).
+
+### Options
+
+```ts
+type CropMode = 'static' | 'smart' | 'autocrop';
+
+interface ComposeMediaOptions {
+  cropMode?: CropMode;              // defaults to 'smart'
+  quality?: 'fast'|'balanced'|'high'; // encoder quality; defaults to 'high' in composeShorts
+  slices?: Array<{ start: number|string; end: number|string; transition?: any }>;
+  preset?: 'youtubeShort' | 'tiktok' | 'instagramReels' | 'shorts';
+  transition?: string | { type: string; duration: number };
+  subtitles?: { srtPath: string };
+  music?: { musicPath: string };
+  autocrop?: object;                // extra options for cropTo916AutoCropVertical (ratio, quality, encoder, etc.)
+  onProgress?: (p: object) => void;
+}
+```
+
+- **`cropMode: 'static'`** — Skip smart analysis, use centered crop (`cropTo916` with `smart: false`).
+- **`cropMode: 'smart'`** — Use Node smart crop (`cropTo916` with `smart: true`, two-shot + speaker bias).
+- **`cropMode: 'autocrop'`** — Use Python AutoCrop-vertical on the final highlight (`cropTo916AutoCropVertical`), with any extra settings passed via `autocrop`.
+
+### Examples
+
+```javascript
+const { FramecraftEngine, composeShorts, composeReels, composeTiktok } = require('ffmpeg-framecraft');
+
+const engine = new FramecraftEngine();
+
+// YouTube Shorts-style highlight with Node smart crop
+await composeShorts(engine, 'input.mp4', 'shorts.mp4', {
+  cropMode: 'smart',
+  quality: 'high',
+  slices: [
+    { start: 0, end: 8 },
+    { start: 40, end: 52 },
+  ],
+  onProgress: (p) => console.log(p.percent?.toFixed(1) ?? '-', '%'),
+});
+
+// Instagram Reels-style highlight (uses instagramReels platform preset)
+await composeReels(engine, 'input.mp4', 'reels.mp4', {
+  cropMode: 'smart',
+  slices: [
+    { start: 10, end: 20 },
+    { start: 30, end: 40 },
+  ],
+});
+
+// TikTok-style highlight using AutoCrop-vertical on the final cut
+await composeTiktok(engine, 'input.mp4', 'tiktok.mp4', {
+  cropMode: 'autocrop',
+  quality: 'high',
+  slices: [
+    { start: 0, end: 10 },
+    { start: 50, end: 60 },
+  ],
+  autocrop: {
+    ratio: '9:16',
+    quality: 'high',
+    encoder: 'auto',
+    // pythonDir / pythonCommand normally come from .autocrop-config.json
+  },
 });
 ```
 
