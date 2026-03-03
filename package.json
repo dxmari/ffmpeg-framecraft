@@ -6,11 +6,15 @@
   "scripts": {
     "test": "node --test test/"
   },
+  "bin": {
+    "ffmpeg-framecraft-setup-autocrop": "scripts/setup-autocrop.js"
+  },
   "files": [
     "LICENSE",
     "README.md",
     "index.js",
-    "src/"
+    "src/",
+    "scripts/setup-autocrop.js"
   ],
   "keywords": [
     "ffmpeg",
@@ -58,5 +62,9 @@
   "license": "ISC",
   "dependencies": {
     "fluent-ffmpeg": "^2.1.3"
+  },
+  "optionalDependencies": {
+    "@tensorflow-models/coco-ssd": "^2.2.3",
+    "@tensorflow/tfjs-node": "^4.22.0"
   }
 }

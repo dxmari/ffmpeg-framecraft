@@ -26,6 +26,83 @@ function cropTo916Filter(width, height) {
 }
 
 /**
+ * Build FFmpeg -vf filter string for content-aware crop using time-based keyframes.
+ *
+ * This supports both:
+ * - TRACK mode: crop to 9:16 window (w=cropWidth) with dynamic x
+ * - LETTERBOX mode: use full width (w=srcWidth, x=0) then scale+pad to 720x1280
+ *
+ * The output chain always ends with scale-to-width + pad so that both track and
+ * letterbox produce a consistent 720x1280 output without stretching.
+ *
+ * @param {number} width - Source video width
+ * @param {number} height - Source video height
+ * @param {Array<{ t: number, x: number, w?: number }>} keyframes - Sorted keyframes in seconds; w is crop width in pixels
+ * @returns {string} FFmpeg video filter string
+ */
+function cropTo916DynamicFilter(width, height, keyframes) {
+  if (!Array.isArray(keyframes) || keyframes.length === 0) {
+    return cropTo916Filter(width, height);
+  }
+
+  const cropWidthRaw = Math.floor((height * 9) / 16);
+  const cropWidth = cropWidthRaw - (cropWidthRaw % 2);
+  const maxX = Math.max(0, width - cropWidth);
+
+  const frames = [...keyframes]
+    .filter((k) => k && Number.isFinite(k.t) && Number.isFinite(k.x))
+    .sort((a, b) => a.t - b.t)
+    .map((k) => ({
+      t: Math.max(0, k.t),
+      x: Math.max(0, Math.min(maxX, k.x)),
+      w: Number.isFinite(k.w) ? k.w : cropWidth,
+    }));
+
+  if (frames.length === 0) {
+    return cropTo916Filter(width, height);
+  }
+
+  // Build a piecewise-linear x(t) with nested if(between(t,...), ..., next).
+  // Keep x even for encoder friendliness: 2*trunc(x/2)
+  let expr = `${frames[frames.length - 1].x}`;
+  for (let i = frames.length - 2; i >= 0; i--) {
+    const t0 = frames[i].t;
+    const t1 = frames[i + 1].t;
+    const x0 = frames[i].x;
+    const x1 = frames[i + 1].x;
+
+    if (t1 <= t0 + 1e-6) {
+      expr = `${x0}`;
+      continue;
+    }
+
+    const seg = `(${x0}+(${x1}-${x0})*(t-${t0})/(${t1}-${t0}))`;
+    expr = `if(between(t\\,${t0}\\,${t1})\\,${seg}\\,${expr})`;
+  }
+
+  const xExpr = `2*trunc((${expr})/2)`;
+
+  // Piecewise-step w(t): hold each segment's width until next keyframe.
+  // Keep width even.
+  let wExpr = `${frames[frames.length - 1].w}`;
+  for (let i = frames.length - 2; i >= 0; i--) {
+    const t0 = frames[i].t;
+    const t1 = frames[i + 1].t;
+    const w0 = frames[i].w;
+    wExpr = `if(between(t\\,${t0}\\,${t1})\\,${w0}\\,${wExpr})`;
+  }
+  wExpr = `2*trunc((${wExpr})/2)`;
+
+  // When w >= src width, force x=0 to avoid invalid crop.
+  const safeXExpr = `if(gte(${wExpr}\\,${width})\\,0\\,${xExpr})`;
+
+  const crop = `crop=w='${wExpr}':h=ih:x='${safeXExpr}':y=0`;
+  const scale = `scale=${SHORTS_WIDTH}:-2`;
+  const pad = `pad=${SHORTS_WIDTH}:${SHORTS_HEIGHT}:(ow-iw)/2:(oh-ih)/2`;
+  return `${crop},${scale},${pad}`;
+}
+
+/**
  * Build FFmpeg subtitles filter string.
  * Escape special characters in path for FFmpeg (colons, backslashes).
  *
@@ -165,6 +242,7 @@ function buildSlicesWithTransitionsFilter(slices, hasAudio = true) {
 
 module.exports = {
   cropTo916Filter,
+  cropTo916DynamicFilter,
   subtitleFilter,
   amixFilter,
   buildSlicesWithTransitionsFilter,

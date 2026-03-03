@@ -1,7 +1,9 @@
 const path = require('path');
 const fs = require('fs');
+const { spawn } = require('child_process');
+const ffmpeg = require('fluent-ffmpeg');
 const { run, probe } = require('./executor');
-const { cropTo916Filter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter } = require('./filters');
+const { cropTo916Filter, cropTo916DynamicFilter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter } = require('./filters');
 const shortsPreset = require('./presets/shorts');
 const { getTransition } = require('./presets/transitions');
 const { getPreset } = require('./presets/presets');
@@ -23,21 +25,410 @@ class FramecraftEngine {
    *
    * @param {string} inputPath - Input video path
    * @param {string} outputPath - Output video path
-   * @param {object} [opts] - Options (future: quality presets, etc.)
+   * @param {object} [opts] - Options
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
+   * @param {boolean} [opts.smart=false] - Enable content-aware (dynamic) crop
+   * @param {number} [opts.smartSampleEvery=0.25] - Seconds between analysis samples (smart crop only)
+   * @param {boolean} [opts.smartTwoShot=true] - When 2+ people are present, keep both in-frame if possible
+   * @param {boolean} [opts.smartSpeakerBias=true] - Bias framing toward the speaking person (heuristic)
    * @returns {Promise<void>}
    */
   async cropTo916(inputPath, outputPath, opts = {}) {
     const meta = await probe(inputPath);
+    if (opts.smart) {
+      await this._cropTo916Smart(inputPath, outputPath, meta, opts);
+      return;
+    }
+
     const filter = cropTo916Filter(meta.width, meta.height);
 
     await run({
       input: inputPath,
       output: outputPath,
       videoFilters: filter,
-      outputOptions: shortsPreset.outputOptions(),
+      outputOptions: shortsPreset.outputOptions(opts.quality),
       expectedDuration: meta.duration || undefined,
       onProgress: opts.onProgress,
+    });
+  }
+
+  /**
+   * Delegate 9:16 cropping to the Python AutoCrop-vertical tool for exact behavior.
+   * This wraps https://github.com/kamilstanuch/Autocrop-vertical/main.py.
+   *
+   * Requirements:
+   * - Clone the AutoCrop-vertical repo somewhere
+   * - Either set AUTO_CROP_VERTICAL_DIR env var, or pass opts.pythonDir
+   * - Have `python3` + its Python deps installed there
+   *
+   * @param {string} inputPath - Input video path
+   * @param {string} outputPath - Output video path
+   * @param {object} [opts]
+   * @param {string} [opts.pythonDir] - Directory containing main.py (overrides AUTO_CROP_VERTICAL_DIR)
+   * @param {string} [opts.pythonScript='main.py'] - Script filename inside pythonDir
+   * @param {string} [opts.pythonCommand='python3'] - Python executable
+   * @param {string} [opts.ratio] - Output aspect ratio, e.g. '9:16', '4:5', '1:1'
+   * @param {string} [opts.quality] - 'fast' | 'balanced' | 'high'
+   * @param {number} [opts.crf] - CRF override (libx264 only)
+   * @param {string} [opts.preset] - x264 preset override, e.g. 'medium'
+   * @param {boolean} [opts.planOnly] - Pass --plan-only (no encoding)
+   * @param {number} [opts.frameSkip] - Scene detection frame skip
+   * @param {number} [opts.downscale] - Scene detection downscale
+   * @param {string} [opts.encoder] - 'auto' | 'hw' | specific encoder name
+   * @param {boolean} [opts.verbose=false] - If true, pipe Python stdout/stderr to this process
+   * @returns {Promise<void>}
+   */
+  async cropTo916AutoCropVertical(inputPath, outputPath, opts = {}) {
+    let pythonDir = opts.pythonDir || process.env.AUTO_CROP_VERTICAL_DIR;
+    let pythonCommand = opts.pythonCommand || process.env.AUTO_CROP_VERTICAL_PY || 'python3';
+
+    // If a config file from the setup script exists, let it provide defaults.
+    const configPath = path.join(process.cwd(), '.autocrop-config.json');
+    if (fs.existsSync(configPath)) {
+      try {
+        const raw = fs.readFileSync(configPath, 'utf8');
+        const cfg = JSON.parse(raw);
+        pythonDir = opts.pythonDir || pythonDir || cfg.pythonDir;
+        pythonCommand = opts.pythonCommand || pythonCommand || cfg.pythonCommand;
+      } catch {
+        // ignore malformed config and fall back to env/opts
+      }
+    }
+
+    if (!pythonDir) {
+      throw new Error(
+        'cropTo916AutoCropVertical requires the AutoCrop-vertical repo. ' +
+        'Run `npx ffmpeg-framecraft-setup-autocrop` or set AUTO_CROP_VERTICAL_DIR / opts.pythonDir.'
+      );
+    }
+
+    const pythonScript = opts.pythonScript || 'main.py';
+
+    const args = [pythonScript, '-i', inputPath, '-o', outputPath];
+
+    if (opts.ratio) args.push('--ratio', String(opts.ratio));
+    if (opts.quality) args.push('--quality', String(opts.quality));
+    if (opts.crf != null) args.push('--crf', String(opts.crf));
+    if (opts.preset) args.push('--preset', String(opts.preset));
+    if (opts.frameSkip != null) args.push('--frame-skip', String(opts.frameSkip));
+    if (opts.downscale != null) args.push('--downscale', String(opts.downscale));
+    if (opts.encoder) args.push('--encoder', String(opts.encoder));
+    if (opts.planOnly) args.push('--plan-only');
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(pythonCommand, args, {
+        cwd: pythonDir,
+        stdio: opts.verbose ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+      });
+
+      let stderrBuf = '';
+      if (!opts.verbose && child.stderr) {
+        child.stderr.on('data', (chunk) => {
+          stderrBuf += chunk.toString();
+        });
+      }
+
+      child.on('error', (err) => {
+        reject(err);
+      });
+
+      child.on('exit', (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          const details = stderrBuf ? `\n\nPython stderr:\n${stderrBuf}` : '';
+          reject(
+            new Error(
+              `AutoCrop-vertical process exited with code ${code}.${details}`
+            )
+          );
+        }
+      });
+    });
+  }
+
+  async _cropTo916Smart(inputPath, outputPath, meta, opts = {}) {
+    const smartSampleEvery = Number.isFinite(opts.smartSampleEvery) ? opts.smartSampleEvery : 0.25;
+    const smartTwoShot = opts.smartTwoShot !== false;
+    const smartSpeakerBias = opts.smartSpeakerBias !== false;
+
+    let tf;
+    let cocoSsd;
+    try {
+      // Lazy-load so base installs don't break. These are optionalDependencies.
+      // eslint-disable-next-line global-require
+      tf = require('@tensorflow/tfjs-node');
+      // eslint-disable-next-line global-require
+      cocoSsd = require('@tensorflow-models/coco-ssd');
+    } catch (err) {
+      throw new Error(
+        "Smart crop requires optional dependencies. Install them with: npm i -S @tensorflow/tfjs-node @tensorflow-models/coco-ssd"
+      );
+    }
+
+    const model = await cocoSsd.load();
+
+    const width = meta.width;
+    const height = meta.height;
+    if (!width || !height) throw new Error('Unable to read input dimensions for smart crop');
+
+    const cropWidthRaw = Math.floor((height * 9) / 16);
+    const cropWidth = cropWidthRaw - (cropWidthRaw % 2);
+    const maxX = Math.max(0, width - cropWidth);
+    const fullW = width - (width % 2);
+
+    const duration = meta.duration || 0;
+    const sampleEvery = Math.max(0.08, smartSampleEvery);
+    const times = [];
+    if (duration > 0) {
+      for (let t = 0; t < duration; t += sampleEvery) times.push(t);
+      if (times.length === 0) times.push(0);
+    } else {
+      // If duration is unknown, sample first ~20 seconds.
+      for (let t = 0; t <= 20; t += sampleEvery) times.push(t);
+    }
+
+    const keyframes = [];
+    let prevX = Math.floor(maxX / 2);
+    let prevW = cropWidth;
+    const alphaX = 0.55;
+
+    // Simple track state for speaker bias via mouth-motion.
+    // We keep at most 4 tracks and match by IoU.
+    /** @type {Array<{ id: number, bbox: number[], mouth?: any, lastMotion: number }>} */
+    let tracks = [];
+    let nextTrackId = 1;
+    let activeSpeakerId = null;
+    let activeSpeakerStreak = 0;
+
+    const iou = (a, b) => {
+      const ax1 = a[0], ay1 = a[1], ax2 = a[0] + a[2], ay2 = a[1] + a[3];
+      const bx1 = b[0], by1 = b[1], bx2 = b[0] + b[2], by2 = b[1] + b[3];
+      const ix1 = Math.max(ax1, bx1);
+      const iy1 = Math.max(ay1, by1);
+      const ix2 = Math.min(ax2, bx2);
+      const iy2 = Math.min(ay2, by2);
+      const iw = Math.max(0, ix2 - ix1);
+      const ih = Math.max(0, iy2 - iy1);
+      const inter = iw * ih;
+      const areaA = Math.max(0, ax2 - ax1) * Math.max(0, ay2 - ay1);
+      const areaB = Math.max(0, bx2 - bx1) * Math.max(0, by2 - by1);
+      const denom = areaA + areaB - inter;
+      return denom > 0 ? inter / denom : 0;
+    };
+
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    const bboxCenterX = (bbox) => bbox[0] + bbox[2] / 2;
+
+    const bboxEnclose = (bboxes) => {
+      if (!bboxes.length) return null;
+      const x1 = Math.min(...bboxes.map((b) => b[0]));
+      const y1 = Math.min(...bboxes.map((b) => b[1]));
+      const x2 = Math.max(...bboxes.map((b) => b[0] + b[2]));
+      const y2 = Math.max(...bboxes.map((b) => b[1] + b[3]));
+      return [x1, y1, x2 - x1, y2 - y1];
+    };
+
+    const getMouthPatch = (imgTensor, bbox) => tf.tidy(() => {
+      // bbox: [x,y,w,h] in input pixel coords
+      const x = clamp(Math.floor(bbox[0]), 0, width - 2);
+      const y = clamp(Math.floor(bbox[1]), 0, height - 2);
+      const w = clamp(Math.floor(bbox[2]), 2, width - x);
+      const h = clamp(Math.floor(bbox[3]), 2, height - y);
+
+      // Approx head box = top 35% of person bbox; mouth = lower portion of head.
+      const headH = Math.max(2, Math.floor(h * 0.35));
+      const mouthY = y + Math.floor(headH * 0.55);
+      const mouthH = Math.max(2, Math.floor(headH * 0.35));
+      const mouthX = x + Math.floor(w * 0.15);
+      const mouthW = Math.max(2, Math.floor(w * 0.7));
+
+      const mx = clamp(mouthX, 0, width - 2);
+      const my = clamp(mouthY, 0, height - 2);
+      const mw = clamp(mouthW, 2, width - mx);
+      const mh = clamp(mouthH, 2, height - my);
+
+      const patch = imgTensor.slice([my, mx, 0], [mh, mw, 3]);
+      const gray = patch.mean(2).div(255.0); // [mh,mw]
+      const resized = tf.image.resizeBilinear(gray.expandDims(-1), [64, 64]).squeeze(); // [64,64]
+      return resized;
+    });
+
+    for (const t of times) {
+      const frame = await this._extractJpegFrame(inputPath, t);
+      const tensor = tf.node.decodeImage(frame, 3);
+      const predictions = await model.detect(tensor);
+
+      const people = predictions
+        .filter((p) => p && p.class === 'person' && (p.score ?? 0) >= 0.4 && Array.isArray(p.bbox))
+        .map((p) => {
+          const [x, y, w, h] = p.bbox;
+          const area = Math.max(0, w) * Math.max(0, h);
+          return { score: p.score ?? 0, area, bbox: p.bbox };
+        })
+        .sort((a, b) => (b.area * b.score) - (a.area * a.score));
+
+      // Keep only top N persons to limit work.
+      const persons = people.slice(0, 4).map((p) => p.bbox);
+
+      // Update / create tracks by IoU matching.
+      const usedTrackIds = new Set();
+      const newTracks = [];
+      for (const bbox of persons) {
+        let best = null;
+        let bestIou = 0;
+        for (const tr of tracks) {
+          if (usedTrackIds.has(tr.id)) continue;
+          const score = iou(tr.bbox, bbox);
+          if (score > bestIou) {
+            bestIou = score;
+            best = tr;
+          }
+        }
+        if (best && bestIou >= 0.15) {
+          usedTrackIds.add(best.id);
+          newTracks.push({ ...best, bbox });
+        } else {
+          const id = nextTrackId++;
+          newTracks.push({ id, bbox, mouth: null, lastMotion: 0 });
+        }
+      }
+
+      // Compute mouth-motion per track (heuristic for speaking).
+      if (smartSpeakerBias) {
+        for (const tr of newTracks) {
+          const patch = getMouthPatch(tensor, tr.bbox);
+          let motion = 0;
+          if (tr.mouth) {
+            motion = tf.tidy(() => patch.sub(tr.mouth).abs().mean().dataSync()[0]);
+            try { tr.mouth.dispose(); } catch (_) {}
+          }
+          tr.mouth = patch;
+          tr.lastMotion = Number.isFinite(motion) ? motion : 0;
+        }
+      }
+
+      // Speaker selection with hysteresis.
+      let speaker = null;
+      if (smartSpeakerBias && newTracks.length > 0) {
+        const sortedByMotion = [...newTracks].sort((a, b) => (b.lastMotion || 0) - (a.lastMotion || 0));
+        const top = sortedByMotion[0];
+        const topMotion = top?.lastMotion ?? 0;
+        // Require a bit of motion to switch; mouth ROI is noisy.
+        const motionThreshold = 0.010;
+        if (top && topMotion >= motionThreshold) {
+          if (activeSpeakerId === top.id) {
+            activeSpeakerStreak++;
+          } else {
+            // Switch only after 2 consecutive wins.
+            if (activeSpeakerStreak >= 1) {
+              activeSpeakerId = top.id;
+              activeSpeakerStreak = 0;
+            } else {
+              activeSpeakerStreak = 1;
+            }
+          }
+        }
+        speaker = newTracks.find((tr) => tr.id === activeSpeakerId) || top;
+      }
+
+      // Decide framing: track single, keep-two (if fits), or letterbox.
+      let desiredW = cropWidth;
+      let xRaw = Math.floor(maxX / 2);
+
+      if (newTracks.length === 0) {
+        // Letterbox when no people.
+        desiredW = fullW;
+        xRaw = 0;
+      } else if (!smartTwoShot || newTracks.length === 1) {
+        const target = speaker || newTracks[0];
+        const cx = bboxCenterX(target.bbox);
+        desiredW = cropWidth;
+        xRaw = Math.round(cx - cropWidth / 2);
+      } else {
+        // Two-shot: keep the top two tracks (by area proxy = bbox area).
+        const topTwo = [...newTracks]
+          .sort((a, b) => (b.bbox[2] * b.bbox[3]) - (a.bbox[2] * a.bbox[3]))
+          .slice(0, 2);
+        const group = bboxEnclose(topTwo.map((t2) => t2.bbox));
+        const groupSpan = group ? group[2] : cropWidth;
+
+        if (group && groupSpan <= cropWidth) {
+          desiredW = cropWidth;
+          const groupLeft = group[0];
+          const groupRight = group[0] + group[2];
+          const minXAllowed = clamp(Math.round(groupRight - cropWidth), 0, maxX);
+          const maxXAllowed = clamp(Math.round(groupLeft), 0, maxX);
+
+          const sp = speaker && topTwo.find((t2) => t2.id === speaker.id) ? speaker : null;
+          const focus = sp ? bboxCenterX(sp.bbox) : (groupLeft + groupRight) / 2;
+          // Put speaker slightly toward the left third (classic talking-head framing),
+          // but clamp to keep both people within the crop window.
+          const desiredX = Math.round(focus - cropWidth * 0.35);
+          xRaw = clamp(desiredX, minXAllowed, maxXAllowed);
+        } else {
+          // If two people don't fit, preserve the full shot via letterbox.
+          desiredW = fullW;
+          xRaw = 0;
+        }
+      }
+
+      // Smooth x to avoid jitter; keep even.
+      xRaw = clamp(xRaw, 0, Math.max(0, width - desiredW));
+      const smoothedX = Math.round(prevX + alphaX * (xRaw - prevX));
+      const evenX = smoothedX - (smoothedX % 2);
+      prevX = clamp(evenX, 0, Math.max(0, width - desiredW));
+      prevW = desiredW;
+
+      keyframes.push({ t: Number(t.toFixed(3)), x: prevX, w: prevW });
+
+      // Dispose frame tensor and keep track state.
+      tensor.dispose();
+      // Keep only recent tracks, and dispose mouth tensors we won't keep.
+      for (const old of tracks) {
+        if (!newTracks.find((nt) => nt.id === old.id) && old.mouth) {
+          try { old.mouth.dispose(); } catch (_) {}
+        }
+      }
+      tracks = newTracks.slice(0, 4);
+    }
+
+    // Reduce keyframes a bit (avoid huge expressions): keep only those that change meaningfully.
+    const compact = [];
+    for (const k of keyframes) {
+      const last = compact[compact.length - 1];
+      if (!last || Math.abs(k.x - last.x) >= 8 || Math.abs((k.w ?? cropWidth) - (last.w ?? cropWidth)) >= 8) {
+        compact.push(k);
+      }
+    }
+    if (compact.length === 0) compact.push({ t: 0, x: Math.floor(maxX / 2), w: cropWidth });
+
+    const filter = cropTo916DynamicFilter(width, height, compact);
+    await run({
+      input: inputPath,
+      output: outputPath,
+      videoFilters: filter,
+      outputOptions: shortsPreset.outputOptions(opts.quality),
+      expectedDuration: meta.duration || undefined,
+      onProgress: opts.onProgress,
+    });
+  }
+
+  _extractJpegFrame(inputPath, timeSeconds) {
+    return new Promise((resolve, reject) => {
+      const chunks = [];
+      const command = ffmpeg(inputPath)
+        .seekInput(Math.max(0, timeSeconds))
+        .frames(1)
+        .outputOptions(['-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '2'])
+        .format('image2pipe');
+
+      const stream = command.pipe();
+      stream.on('data', (d) => chunks.push(d));
+      stream.on('error', (e) => reject(e));
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
     });
   }
 
@@ -49,6 +440,7 @@ class FramecraftEngine {
    * @param {{ start: number|string, end: number|string }} range - Start and end time (seconds or "mm:ss.ms")
    * @param {object} [opts] - Options
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async slice(inputPath, outputPath, range, opts = {}) {
@@ -65,7 +457,7 @@ class FramecraftEngine {
       output: outputPath,
       seek: start,
       duration,
-      outputOptions: shortsPreset.outputOptions(),
+      outputOptions: shortsPreset.outputOptions(opts.quality),
       expectedDuration: typeof duration === 'number' ? duration : undefined,
       onProgress: opts.onProgress,
     });
@@ -79,17 +471,18 @@ class FramecraftEngine {
    * @param {string} srtPath - Path to SRT file
    * @param {object} [opts] - Style options for future AI caption styling
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async addSubtitles(inputPath, outputPath, srtPath, opts = {}) {
-    const { onProgress, ...style } = opts;
+    const { onProgress, quality, ...style } = opts;
     const filter = subtitleFilter(srtPath, style);
 
     await run({
       input: inputPath,
       output: outputPath,
       videoFilters: filter,
-      outputOptions: shortsPreset.outputOptions(),
+      outputOptions: shortsPreset.outputOptions(quality),
       onProgress,
     });
   }
@@ -125,10 +518,11 @@ class FramecraftEngine {
    * @param {object} [opts] - Options
    * @param {number} [opts.musicVolume=1] - Music volume 0-1 (future)
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async addBackgroundMusic(inputPath, outputPath, musicPath, opts = {}) {
-    const { onProgress } = opts;
+    const { onProgress, quality } = opts;
     const meta = await probe(inputPath);
     const filterComplex = amixFilter(meta.hasAudio);
 
@@ -138,10 +532,7 @@ class FramecraftEngine {
       output: outputPath,
       complexFilter: filterComplex,
       complexFilterMap: ['0:v', '[aout]'],
-      outputOptions: [
-        '-c:v', 'libx264', '-preset', 'medium', '-crf', '23',
-        '-c:a', 'aac', '-b:a', '128k',
-      ],
+      outputOptions: shortsPreset.outputOptions(quality),
       expectedDuration: meta.duration || undefined,
       onProgress,
     });
@@ -158,6 +549,7 @@ class FramecraftEngine {
    * @param {string|{ type: string, duration: number }} [options.transition='fade'] - Preset name (e.g. 'fade', 'wipeleft', 'dissolve') or { type, duration } in seconds
    * @param {object} [opts] - Additional options
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async slicesWithTransitions(inputPath, outputPath, options, opts = {}) {
@@ -234,7 +626,7 @@ class FramecraftEngine {
       output: outputPath,
       complexFilter: filterComplex,
       complexFilterMap,
-      outputOptions: shortsPreset.outputOptions(),
+      outputOptions: shortsPreset.outputOptions(opts.quality),
       expectedDuration: outputDuration,
       onProgress: opts.onProgress,
     });
@@ -248,6 +640,7 @@ class FramecraftEngine {
    * @param {string|Array<{ op: string, [key: string]: any }>} [pipeline='shorts'] - Preset name or list of { op, ...args }
    * @param {object} [opts] - Options
    * @param {function(object): void} [opts.onProgress] - Progress callback
+   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async compose(inputPath, outputPath, pipeline = 'shorts', opts = {}) {

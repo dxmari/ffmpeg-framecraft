@@ -23,6 +23,7 @@ A Node.js-friendly FFmpeg toolkit for video processing: crop to 9:16, slice by t
 - [Progress reporting](#progress-reporting)
 - [API reference](#api-reference)
 - [Advanced: filter builders](#advanced-filter-builders)
+- [Advanced AutoCrop-vertical integration](#advanced-autocrop-vertical-integration)
 - [License](#license)
 
 ---
@@ -88,13 +89,21 @@ await engine.slicesWithTransitions('input.mp4', 'highlight.mp4', {
 
 ### 1. Crop to 9:16
 
-Converts horizontal video to vertical (9:16). Uses a centered crop then scales to **720×1280** (baseline-friendly). Suited for Shorts/Reels/TikTok and similar formats.
+Converts horizontal video to vertical (9:16) and scales to **720×1280** (baseline-friendly).
+
+- **Default (static)**: centered crop (fast, no extra dependencies).
+- **Smart (dynamic, Node)**: content-aware crop that tracks people, supports two-person shots, and biases framing toward the “speaking” person using a lightweight mouth-motion heuristic. No Python required, but does rely on optional JS AI deps.
+- **Python (AutoCrop-vertical, recommended for advanced)**: delegates to the original [Autocrop-vertical](https://github.com/kamilstanuch/Autocrop-vertical) Python script for scene-aware TRACK/LETTERBOX, VFR handling, per-frame processing, audio start-time compensation, and hardware encoding. Best quality and behavior for complex content (interviews, podcasts, multi-person scenes).
 
 | Parameter     | Type   | Description |
 |---------------|--------|-------------|
 | `inputPath`   | string | Source video path |
 | `outputPath`  | string | Output path (e.g. `.mp4`) |
 | `opts.onProgress` | function | `(progress) => {}`; `progress.percent` is 0–100 |
+| `opts.smart` | boolean | Enable smart (dynamic) crop (default: `false`) |
+| `opts.smartSampleEvery` | number | Seconds between analysis samples (default: `0.25`) |
+| `opts.smartTwoShot` | boolean | When 2+ people are present, keep both in-frame if possible (default: `true`) |
+| `opts.smartSpeakerBias` | boolean | Bias framing toward the speaking person (heuristic) (default: `true`) |
 
 **Example**
 
@@ -103,6 +112,29 @@ await engine.cropTo916('landscape.mp4', 'vertical.mp4');
 
 await engine.cropTo916('landscape.mp4', 'vertical.mp4', {
   onProgress: (p) => console.log(`${p.percent?.toFixed(1) ?? '-'}%`),
+});
+
+// Smart (dynamic) crop
+await engine.cropTo916('landscape.mp4', 'vertical_smart.mp4', {
+  smart: true,
+  smartSampleEvery: 0.25,
+});
+
+// Smart crop tuned for interviews/podcasts (keep 2 people + speaker bias)
+await engine.cropTo916('input.mp4', 'vertical_podcast.mp4', {
+  smart: true,
+  smartTwoShot: true,
+  smartSpeakerBias: true,
+  smartSampleEvery: 0.15,
+});
+
+// Python-backed AutoCrop-vertical (exact behavior, recommended for advanced use)
+await engine.cropTo916AutoCropVertical('input.mp4', 'vertical_autocrop.mp4', {
+  ratio: '9:16',       // same as --ratio
+  quality: 'balanced', // 'fast' | 'balanced' | 'high'
+  encoder: 'auto',     // 'auto' | 'hw' | specific encoder name
+  // frameSkip: 0,
+  // downscale: 0,
 });
 ```
 
@@ -452,6 +484,79 @@ const slices = [
 const { filterComplex, mapVideo, mapAudio } = buildSlicesWithTransitionsFilter(slices, true);
 // Use filterComplex with -filter_complex and mapVideo/mapAudio with -map
 ```
+
+---
+
+## Advanced AutoCrop-vertical integration
+
+For the most advanced, scene-aware cropping (mirroring the behavior of [Autocrop-vertical](https://github.com/kamilstanuch/Autocrop-vertical)), `ffmpeg-framecraft` can delegate cropping to the Python tool.
+
+- **When to use this** (recommended):
+  - Multi-person scenes (interviews, podcasts, group shots).
+  - You want the exact TRACK vs LETTERBOX behavior, scene detection, VFR normalization, and audio sync that AutoCrop-vertical provides.
+  - You’re OK installing Python dependencies once on your machine or server.
+
+- **What it does:**
+  - Uses PySceneDetect to split the video into scenes.
+  - For each scene, uses YOLOv8 + face detection to decide:
+    - **TRACK** (tight crop on subject) vs
+    - **LETTERBOX** (preserve full shot with black bars).
+  - Processes frames with OpenCV and encodes via FFmpeg.
+  - Normalizes VFR → CFR and compensates audio start-time offsets.
+
+### Recommended setup (one-time)
+
+Run the built-in setup command from your project root:
+
+```bash
+npx ffmpeg-framecraft-setup-autocrop \
+  --py-command python3.9 \
+  --py-dir .
+```
+
+- **Python requirement:** The underlying [Autocrop-vertical](https://github.com/kamilstanuch/Autocrop-vertical) tool officially supports **Python 3.8+**. For best compatibility use a Python 3.8–3.11 interpreter when choosing `--py-command` (for example `python3.9` or `python3.10`).
+- **`--py-command`**: Python executable to use for the venv (e.g. `python3`, `python3.9` or a full path).
+- **`--py-dir`**: Base directory where `autocrop-vertical/` should be cloned (default: current directory).
+
+What this does:
+
+- Clones `Autocrop-vertical` into `<py-dir>/autocrop-vertical` (if not already present).
+- Creates a virtualenv in `autocrop-vertical/.venv`.
+- Upgrades pip, pins `numpy<2`, and installs `requirements.txt`.
+- Writes `.autocrop-config.json` in `py-dir` with:
+  - `pythonDir` — path to the AutoCrop-vertical repo.
+  - `pythonCommand` — path to the venv’s Python binary.
+
+After this, you can call `cropTo916AutoCropVertical` without passing Python paths explicitly.
+
+### Using AutoCrop-vertical from Node
+
+```javascript
+const { FramecraftEngine } = require('ffmpeg-framecraft');
+const engine = new FramecraftEngine();
+
+await engine.cropTo916AutoCropVertical('input.mp4', 'vertical_autocrop.mp4', {
+  // All options are optional if you ran the setup script:
+  // pythonDir: '/custom/path/to/autocrop-vertical',
+  // pythonCommand: '/custom/path/to/python',
+  ratio: '9:16',        // maps to --ratio
+  quality: 'balanced',  // 'fast' | 'balanced' | 'high'
+  encoder: 'auto',      // 'auto' | 'hw' | explicit encoder name
+  // frameSkip: 0,
+  // downscale: 0,
+  // planOnly: true,
+});
+```
+
+Resolution order for Python settings:
+
+- `opts.pythonDir` / `opts.pythonCommand` (explicit in code)
+- Environment:
+  - `AUTO_CROP_VERTICAL_DIR`
+  - `AUTO_CROP_VERTICAL_PY`
+- `.autocrop-config.json` written by `ffmpeg-framecraft-setup-autocrop`
+
+If `pythonDir` is still missing, the engine throws with a clear message suggesting running the setup command or setting environment variables.
 
 ---
 

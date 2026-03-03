@@ -1,6 +1,7 @@
 const { FramecraftEngine } = require('./src/engine');
-const { cropTo916Filter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter, SHORTS_WIDTH, SHORTS_HEIGHT } = require('./src/filters');
+const { cropTo916Filter, cropTo916DynamicFilter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter, SHORTS_WIDTH, SHORTS_HEIGHT } = require('./src/filters');
 const { PRESETS: TRANSITION_PRESETS, getTransition } = require('./src/presets/transitions');
+const { MEDIA_PRESETS, composeShorts } = require('./src/presets/media');
 const {
   youtubeShortPreset,
   tiktokPreset,
@@ -13,6 +14,7 @@ const {
 module.exports = {
   FramecraftEngine,
   cropTo916Filter,
+  cropTo916DynamicFilter,
   subtitleFilter,
   amixFilter,
   buildSlicesWithTransitionsFilter,
@@ -26,4 +28,6 @@ module.exports = {
   shortsPresetConfig,
   PLATFORM_PRESETS,
   getPreset,
+  MEDIA_PRESETS,
+  composeShorts,
 };
