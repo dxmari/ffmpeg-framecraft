@@ -97,7 +97,7 @@ async function composeShorts(engineInstance, inputPath, outputPath, options = {}
   // 3) Cleanup temp highlight if it was created
   if (tempHighlight !== outputPath) {
     try {
-      // fs.unlinkSync(tempHighlight);
+      fs.unlinkSync(tempHighlight);
     } catch {
       // ignore cleanup errors
     }

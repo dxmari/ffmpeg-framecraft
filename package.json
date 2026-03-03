@@ -1,6 +1,6 @@
 {
   "name": "ffmpeg-framecraft",
-  "version": "1.0.1",
+  "version": "1.0.4",
   "description": "FFmpeg-based video processing: crop, slice, transitions, subtitles, audio extraction",
   "main": "index.js",
   "scripts": {

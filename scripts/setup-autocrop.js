@@ -59,8 +59,18 @@ function parseArgs(argv) {
 
   console.log('Upgrading pip and installing dependencies (pinning numpy<2)...');
   await run(pythonBin, ['-m', 'pip', 'install', '--upgrade', 'pip'], { cwd: targetDir });
-  await run(pythonBin, ['-m', 'pip', 'install', '\"numpy<2\"'], { cwd: targetDir });
+
+  // Ensure we are on NumPy 1.x before (re)installing heavy deps that depend on it.
+  try {
+    await run(pythonBin, ['-m', 'pip', 'uninstall', '-y', 'numpy'], { cwd: targetDir });
+  } catch {
+    // ignore if numpy was not installed yet
+  }
+  
+  // Install the base requirements (PySceneDetect, OpenCV, Ultralytics, etc.)
   await run(pythonBin, ['-m', 'pip', 'install', '-r', 'requirements.txt'], { cwd: targetDir });
+  
+  await run(pythonBin, ['-m', 'pip', 'install', 'numpy<2'], { cwd: targetDir });
 
   const configPath = path.join(root, '.autocrop-config.json');
   const config = {
