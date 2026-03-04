@@ -4,7 +4,8 @@ const { FramecraftEngine, composeShorts } = require('..');
 const { PRESETS: TRANSITION_PRESETS } = require('../src/presets/transitions');
 const engine = new FramecraftEngine();
 
-const inputPath = path.join(__dirname, '../demos/data/input.mp4');
+// const inputPath = path.join(__dirname, '../demos/data/input.mp4');
+const inputPath = path.join(__dirname, '../example/media/input.mp4');
 const outputPath = path.join(__dirname, '../example/media/output.mp4');
 
 // const inputPath = path.join(__dirname, '../example/media/output.mp4');
@@ -66,6 +67,7 @@ const cropTo916 = async () => {
       ratio: '9:16',
       quality: 'high',
       encoder: 'auto',
+      // encodeWithFramecraft: true,  // use AutoCrop plan-only + Node encode (single pass, better quality)
       // frameSkip: 0,
       // downscale: 0,
     });
@@ -92,18 +94,21 @@ const cropTo916Smart = async () => {
 const runComposeShorts = async () => {
   await composeShorts(engine, inputPath, outputPath, {
     cropMode: 'autocrop', // or 'smart' or 'static'
-    quality: 'high',
+    quality: 'max',
     slices: [
-      { start: 0, end: 8 },
-      { start: 40, end: 52, transition: TRANSITION_PRESETS.fadeLong },
-      { start: 110, end: 120, transition: TRANSITION_PRESETS.fadeblack },
+      { start: 0, end: 20 },
+      { start: 25, end: 35, transition: TRANSITION_PRESETS.fadeblack },
+      { start: 35, end: 52, transition: TRANSITION_PRESETS.fadeblack },
     ],
+    transitionDummyHold: 1, // 1s frozen frame at each cut for smoother transitions
     // subtitles: { srtPath: 'subs.srt' },
     // music: { musicPath: 'bgm.mp3' },
     autocrop: {
       ratio: '9:16',
-      quality: 'high',
+      quality: 'max',
       encoder: 'auto',
+      // encodeWithFramecraft: true,  // plan-only + Node encode for better quality (requires setup patch)
+      // resolution: '720',
       pythonDir: path.join(__dirname, '../autocrop-vertical'),
       pythonCommand: path.join(__dirname, '../autocrop-vertical', '.venv', 'bin', 'python3.9')
     },

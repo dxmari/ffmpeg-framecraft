@@ -7,13 +7,14 @@ const {
   amixFilter,
   SHORTS_WIDTH,
   SHORTS_HEIGHT,
+  getVerticalSize,
 } = require('../src/filters');
 
 describe('cropTo916Filter', () => {
-  it('produces crop,scale chain for 1920x1080', () => {
+  it('produces crop,scale chain for 1920x1080 (default 1080p)', () => {
     const filter = cropTo916Filter(1920, 1080);
     assert.match(filter, /crop=\d+:\d+:\d+:\d+/);
-    assert.match(filter, /scale=720:1280/);
+    assert.match(filter, /scale=1080:1920/);
     const cropMatch = filter.match(/crop=(\d+):(\d+):(\d+):(\d+)/);
     assert.ok(cropMatch);
     const [, w, h, x, y] = cropMatch.map(Number);
@@ -33,9 +34,21 @@ describe('cropTo916Filter', () => {
     assert.strictEqual(x, 437);
   });
 
-  it('scales to SHORTS_WIDTH x SHORTS_HEIGHT', () => {
+  it('scales to SHORTS_WIDTH x SHORTS_HEIGHT by default', () => {
     const filter = cropTo916Filter(100, 100);
     assert.ok(filter.includes(`scale=${SHORTS_WIDTH}:${SHORTS_HEIGHT}`));
+  });
+
+  it('uses 720x1280 when resolution 720 target passed', () => {
+    const target = getVerticalSize('720');
+    const filter = cropTo916Filter(1920, 1080, target);
+    assert.match(filter, /scale=720:1280/);
+  });
+
+  it('uses 406x720 when resolution light target passed', () => {
+    const target = getVerticalSize('light');
+    const filter = cropTo916Filter(1920, 1080, target);
+    assert.match(filter, /scale=406:720/);
   });
 });
 
@@ -78,10 +91,10 @@ describe('amixFilter', () => {
 });
 
 describe('constants', () => {
-  it('SHORTS_WIDTH is 720', () => {
-    assert.strictEqual(SHORTS_WIDTH, 720);
+  it('SHORTS_WIDTH is 1080 (default vertical)', () => {
+    assert.strictEqual(SHORTS_WIDTH, 1080);
   });
-  it('SHORTS_HEIGHT is 1280', () => {
-    assert.strictEqual(SHORTS_HEIGHT, 1280);
+  it('SHORTS_HEIGHT is 1920 (default vertical)', () => {
+    assert.strictEqual(SHORTS_HEIGHT, 1920);
   });
 });

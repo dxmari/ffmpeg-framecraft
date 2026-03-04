@@ -79,6 +79,16 @@ function parseArgs(argv) {
   };
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
+  // Apply plan-output patch so encodeWithFramecraft can use plan-only + Node encode
+  const { applyPlanOutputPatch } = require('./apply-autocrop-plan-patch');
+  const mainPath = path.join(targetDir, 'main.py');
+  try {
+    const applied = applyPlanOutputPatch(mainPath);
+    if (applied) console.log('Applied plan-output patch to main.py (for encodeWithFramecraft).');
+  } catch (e) {
+    console.warn('Could not apply plan-output patch:', e.message);
+  }
+
   console.log('\nAutoCrop-vertical setup complete.');
   console.log(`Config written to ${configPath}`);
 })().catch((err) => {

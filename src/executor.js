@@ -118,7 +118,13 @@ function run(config) {
         onProgress(next);
       });
     }
-    command.on('error', (err) => reject(err));
+    command.on('error', (err, stdout, stderr) => {
+      if (stderr && err.message && !err.message.includes('FFmpeg stderr:')) {
+        const tail = stderr.trim().split('\n').slice(-30).join('\n');
+        if (tail) err.message += '\n\nFFmpeg stderr:\n' + tail;
+      }
+      reject(err);
+    });
     command.on('end', () => {
       // if (typeof onProgress === 'function') onProgress({ percent: 100 });
       resolve();

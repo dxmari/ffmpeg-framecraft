@@ -60,12 +60,12 @@ const instagramReelsPreset = {
   audioBitrate: '128k',
 };
 
-/** @constant {object} Generic vertical/shorts preset (720p, baseline compatibility) */
+/** @constant {object} Generic vertical/shorts preset (1080p default; use resolution '720' for lighter) */
 const shortsPresetConfig = {
   aspectRatio: '9:16',
-  resolution: '720x1280',
-  width: 720,
-  height: 1280,
+  resolution: '1080x1920',
+  width: 1080,
+  height: 1920,
   subtitles: true,
   watermark: false,
   transition: 'fade',

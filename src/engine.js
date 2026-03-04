@@ -1,9 +1,10 @@
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const { spawn } = require('child_process');
 const ffmpeg = require('fluent-ffmpeg');
 const { run, probe } = require('./executor');
-const { cropTo916Filter, cropTo916DynamicFilter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter } = require('./filters');
+const { cropTo916Filter, cropTo916DynamicFilter, subtitleFilter, amixFilter, buildSlicesWithTransitionsFilter, getVerticalSize } = require('./filters');
 const shortsPreset = require('./presets/shorts');
 const { getTransition } = require('./presets/transitions');
 const { getPreset } = require('./presets/presets');
@@ -20,14 +21,17 @@ function sliceTimeToSeconds(value) {
  */
 class FramecraftEngine {
   /**
-   * Crop video to 9:16 vertical format (720x1280).
+   * Crop video to 9:16 vertical format (default 1080×1920; use opts.resolution='720' for 720×1280).
    * Uses ffprobe to get dimensions, then applies centered crop + scale.
    *
    * @param {string} inputPath - Input video path
    * @param {string} outputPath - Output video path
    * @param {object} [opts] - Options
    * @param {function(object): void} [opts.onProgress] - Progress callback
-   * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
+   * @param {'fast'|'balanced'|'high'|'max'} [opts.quality='balanced'] - Encoding quality
+   * @param {number} [opts.crf] - Override CRF (0-51). Overrides quality tier.
+   * @param {string} [opts.preset] - Override x264 preset (e.g. 'veryslow'). Overrides quality tier.
+   * @param {'720'|'1080'|'light'} [opts.resolution='1080'] - Output size: 720×1280, 1080×1920 (recommended), or light 406×720
    * @param {boolean} [opts.smart=false] - Enable content-aware (dynamic) crop
    * @param {number} [opts.smartSampleEvery=0.25] - Seconds between analysis samples (smart crop only)
    * @param {boolean} [opts.smartTwoShot=true] - When 2+ people are present, keep both in-frame if possible
@@ -41,13 +45,13 @@ class FramecraftEngine {
       return;
     }
 
-    const filter = cropTo916Filter(meta.width, meta.height);
+    const filter = cropTo916Filter(meta.width, meta.height, getVerticalSize(opts.resolution));
 
     await run({
       input: inputPath,
       output: outputPath,
       videoFilters: filter,
-      outputOptions: shortsPreset.outputOptions(opts.quality),
+      outputOptions: shortsPreset.outputOptions(opts.quality, { crf: opts.crf, preset: opts.preset }),
       expectedDuration: meta.duration || undefined,
       onProgress: opts.onProgress,
     });
@@ -73,6 +77,8 @@ class FramecraftEngine {
    * @param {number} [opts.crf] - CRF override (libx264 only)
    * @param {string} [opts.preset] - x264 preset override, e.g. 'medium'
    * @param {boolean} [opts.planOnly] - Pass --plan-only (no encoding)
+   * @param {boolean} [opts.encodeWithFramecraft=false] - If true, run AutoCrop with --plan-only, read plan JSON, then encode with Node (single pass, better quality). Requires setup-autocrop to have applied the plan-output patch.
+   * @param {'720'|'1080'|'light'} [opts.resolution='1080'] - Output size when using encodeWithFramecraft: 720×1280, 1080×1920, or light 406×720
    * @param {number} [opts.frameSkip] - Scene detection frame skip
    * @param {number} [opts.downscale] - Scene detection downscale
    * @param {string} [opts.encoder] - 'auto' | 'hw' | specific encoder name
@@ -107,14 +113,71 @@ class FramecraftEngine {
 
     const args = [pythonScript, '-i', inputPath, '-o', outputPath];
 
+    // Python only accepts 'fast'|'balanced'|'high'; map 'max' -> 'high' or omit
+    const pyQuality = opts.quality === 'max' ? 'high' : opts.quality;
+    if (pyQuality && ['fast', 'balanced', 'high'].includes(pyQuality)) {
+      args.push('--quality', pyQuality);
+    }
     if (opts.ratio) args.push('--ratio', String(opts.ratio));
-    if (opts.quality) args.push('--quality', String(opts.quality));
     if (opts.crf != null) args.push('--crf', String(opts.crf));
     if (opts.preset) args.push('--preset', String(opts.preset));
     if (opts.frameSkip != null) args.push('--frame-skip', String(opts.frameSkip));
     if (opts.downscale != null) args.push('--downscale', String(opts.downscale));
     if (opts.encoder) args.push('--encoder', String(opts.encoder));
-    if (opts.planOnly) args.push('--plan-only');
+    if (opts.planOnly && !opts.encodeWithFramecraft) args.push('--plan-only');
+
+    // Plan-only then encode in Node (single pass, better quality)
+    if (opts.encodeWithFramecraft) {
+      const planPath = path.join(os.tmpdir(), `framecraft-autocrop-plan-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+      args.push('--plan-only', '--plan-output', planPath);
+      try {
+        await new Promise((resolve, reject) => {
+          const child = spawn(pythonCommand, args, {
+            cwd: pythonDir,
+            stdio: opts.verbose ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+          });
+          let stderrBuf = '';
+          if (!opts.verbose && child.stderr) {
+            child.stderr.on('data', (chunk) => { stderrBuf += chunk.toString(); });
+          }
+          child.on('error', reject);
+          child.on('exit', (code) => {
+            if (code === 0) resolve();
+            else {
+              const details = stderrBuf ? `\n\nPython stderr:\n${stderrBuf}` : '';
+              reject(new Error(`AutoCrop-vertical plan-only exited with code ${code}.${details}`));
+            }
+          });
+        });
+        if (!fs.existsSync(planPath)) {
+          throw new Error('AutoCrop-vertical did not write plan file. Ensure setup applied the plan-output patch (re-run npx ffmpeg-framecraft-setup-autocrop).');
+        }
+        const planRaw = fs.readFileSync(planPath, 'utf8');
+        let plan;
+        try {
+          plan = JSON.parse(planRaw);
+        } catch (e) {
+          throw new Error(`Invalid plan JSON: ${e.message}`);
+        }
+        const keyframes = this._autocropPlanToKeyframes(plan);
+        const meta = await probe(inputPath);
+        const filter = cropTo916DynamicFilter(meta.width, meta.height, keyframes, getVerticalSize(opts.resolution));
+        await run({
+          input: inputPath,
+          output: outputPath,
+          videoFilters: filter,
+          outputOptions: shortsPreset.outputOptions(opts.quality || 'balanced', {
+            crf: opts.crf,
+            preset: opts.preset,
+          }),
+          expectedDuration: meta.duration || undefined,
+          onProgress: opts.onProgress,
+        });
+      } finally {
+        try { fs.unlinkSync(planPath); } catch (_) {}
+      }
+      return;
+    }
 
     await new Promise((resolve, reject) => {
       const child = spawn(pythonCommand, args, {
@@ -146,6 +209,51 @@ class FramecraftEngine {
         }
       });
     });
+  }
+
+  /**
+   * Convert AutoCrop-vertical plan JSON to keyframes for cropTo916DynamicFilter.
+   * Plan format: { width, height, scenes: [ { start, end, strategy, x, w } ] }
+   * @param {{ width: number, height: number, scenes: Array<{ start: number, end: number, strategy: string, x: number, w: number }> }} plan
+   * @returns {Array<{ t: number, x: number, w: number }>}
+   */
+  _autocropPlanToKeyframes(plan) {
+    const planWidth = Number(plan?.width) || 1920;
+    const planHeight = Number(plan?.height) || 1080;
+    const cropWDefault = Math.floor((planHeight * 9) / 16) - (Math.floor((planHeight * 9) / 16) % 2);
+    const maxXPlan = Math.max(0, planWidth - cropWDefault);
+    const widthEven = planWidth - (planWidth % 2);
+
+    const scenes = plan?.scenes;
+    if (!Array.isArray(scenes) || scenes.length === 0) {
+      const x = Math.max(0, Math.min(maxXPlan, Math.floor((planWidth - cropWDefault) / 2)));
+      const xEven = x - (x % 2);
+      return [{ t: 0, x: xEven, w: cropWDefault }];
+    }
+    const keyframes = [];
+    for (const s of scenes) {
+      const t = Number(s.start);
+      let x = Number(s.x) || 0;
+      let w = Number(s.w) || cropWDefault;
+      w = Math.min(widthEven, Math.max(cropWDefault, w));
+      w = w - (w % 2);
+      x = Math.max(0, Math.min(maxXPlan, x));
+      if (x + w > widthEven) x = Math.max(0, widthEven - w);
+      x = x - (x % 2);
+      keyframes.push({ t, x, w });
+    }
+    const last = scenes[scenes.length - 1];
+    if (last && Number(last.end) > Number(last.start)) {
+      let x = Number(last.x) || 0;
+      let w = Number(last.w) || cropWDefault;
+      w = Math.min(widthEven, Math.max(cropWDefault, w));
+      w = w - (w % 2);
+      x = Math.max(0, Math.min(maxXPlan, x));
+      if (x + w > widthEven) x = Math.max(0, widthEven - w);
+      x = x - (x % 2);
+      keyframes.push({ t: last.end, x, w });
+    }
+    return keyframes;
   }
 
   async _cropTo916Smart(inputPath, outputPath, meta, opts = {}) {
@@ -405,12 +513,12 @@ class FramecraftEngine {
     }
     if (compact.length === 0) compact.push({ t: 0, x: Math.floor(maxX / 2), w: cropWidth });
 
-    const filter = cropTo916DynamicFilter(width, height, compact);
+    const filter = cropTo916DynamicFilter(width, height, compact, getVerticalSize(opts.resolution));
     await run({
       input: inputPath,
       output: outputPath,
       videoFilters: filter,
-      outputOptions: shortsPreset.outputOptions(opts.quality),
+      outputOptions: shortsPreset.outputOptions(opts.quality, { crf: opts.crf, preset: opts.preset }),
       expectedDuration: meta.duration || undefined,
       onProgress: opts.onProgress,
     });
@@ -457,7 +565,7 @@ class FramecraftEngine {
       output: outputPath,
       seek: start,
       duration,
-      outputOptions: shortsPreset.outputOptions(opts.quality),
+      outputOptions: shortsPreset.outputOptions(opts.quality, { crf: opts.crf, preset: opts.preset }),
       expectedDuration: typeof duration === 'number' ? duration : undefined,
       onProgress: opts.onProgress,
     });
@@ -547,13 +655,14 @@ class FramecraftEngine {
    * @param {object} options - Options
    * @param {Array<{ start: number|string, end: number|string }>} options.slices - Time ranges (seconds or "H:MM:SS" / "MM:SS")
    * @param {string|{ type: string, duration: number }} [options.transition='fade'] - Preset name (e.g. 'fade', 'wipeleft', 'dissolve') or { type, duration } in seconds
+   * @param {number} [options.transitionDummyHold=0] - Seconds of frozen frame at each boundary so the transition runs over the hold instead of the live cut (e.g. 1 for smoother result)
    * @param {object} [opts] - Additional options
    * @param {function(object): void} [opts.onProgress] - Progress callback
    * @param {'fast'|'balanced'|'high'} [opts.quality='balanced'] - Encoding quality
    * @returns {Promise<void>}
    */
   async slicesWithTransitions(inputPath, outputPath, options, opts = {}) {
-    const { slices, preset } = options;
+    const { slices, preset, transitionDummyHold } = options;
     let transitionOption = options.transition;
     if (transitionOption === undefined && preset) {
       const p = typeof preset === 'string' ? getPreset(preset) : preset;
@@ -615,7 +724,8 @@ class FramecraftEngine {
 
     const { filterComplex, mapVideo, mapAudio } = buildSlicesWithTransitionsFilter(
       slicesNormalized,
-      meta.hasAudio
+      meta.hasAudio,
+      { transitionDummyHold: transitionDummyHold != null ? Number(transitionDummyHold) : 0 }
     );
 
     const complexFilterMap = [mapVideo];
@@ -626,7 +736,7 @@ class FramecraftEngine {
       output: outputPath,
       complexFilter: filterComplex,
       complexFilterMap,
-      outputOptions: shortsPreset.outputOptions(opts.quality),
+      outputOptions: shortsPreset.outputOptions(opts.quality, { crf: opts.crf, preset: opts.preset }),
       expectedDuration: outputDuration,
       onProgress: opts.onProgress,
     });
@@ -696,6 +806,7 @@ class FramecraftEngine {
             slices: step.slices,
             transition: step.transition,
             preset: step.preset,
+            transitionDummyHold: step.transitionDummyHold,
           }, opts);
           break;
         case 'audioOnly':

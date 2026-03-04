@@ -22,6 +22,7 @@ const fs = require('fs');
  * @param {Array<{ start: number|string, end: number|string, transition?: any }>} [options.slices]
  * @param {string} [options.preset='youtubeShort']
  * @param {string|{ type: string, duration: number }} [options.transition]
+ * @param {number} [options.transitionDummyHold=0] - Seconds of frozen frame at each cut for smoother transitions (e.g. 1)
  * @param {{ srtPath: string }|undefined} [options.subtitles]
  * @param {{ musicPath: string }|undefined} [options.music]
  * @param {object} [options.autocrop] - Extra options passed to cropTo916AutoCropVertical
@@ -33,6 +34,7 @@ async function composeShorts(engineInstance, inputPath, outputPath, options = {}
     slices = [],
     preset = 'youtubeShort',
     transition,
+    transitionDummyHold,
     subtitles,
     music,
     autocrop = {},
@@ -53,6 +55,7 @@ async function composeShorts(engineInstance, inputPath, outputPath, options = {}
       slices,
       preset,
       transition,
+      transitionDummyHold,
     });
   }
 

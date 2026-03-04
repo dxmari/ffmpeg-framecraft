@@ -90,7 +90,7 @@ await engine.slicesWithTransitions('input.mp4', 'highlight.mp4', {
 
 ### 1. Crop to 9:16
 
-Converts horizontal video to vertical (9:16) and scales to **720×1280** (baseline-friendly).
+Converts horizontal video to vertical (9:16) and scales to **1080×1920** by default. Use `opts.resolution='720'` for 720×1280, or `opts.resolution='light'` for **406×720** (smallest).
 
 - **Default (static)**: centered crop (fast, no extra dependencies).
 - **Smart (dynamic, Node)**: content-aware crop that tracks people, supports two-person shots, and biases framing toward the “speaking” person using a lightweight mouth-motion heuristic. No Python required, but does rely on optional JS AI deps.
@@ -101,7 +101,8 @@ Converts horizontal video to vertical (9:16) and scales to **720×1280** (baseli
 | `inputPath`   | string | Source video path |
 | `outputPath`  | string | Output path (e.g. `.mp4`) |
 | `opts.onProgress` | function | `(progress) => {}`; `progress.percent` is 0–100 |
-| `opts.quality` | `'fast' \| 'balanced' \| 'high'` | Encoding quality preset. `balanced` is default; `high` uses lower CRF and slower x264 preset. |
+| `opts.quality` | `'fast' \| 'balanced' \| 'high' \| 'max'` | Encoding quality. `balanced` default; `high` = lower CRF, slower preset; `max` = best quality (CRF 15, veryslow), largest files. |
+| `opts.resolution` | `'720' \| '1080' \| 'light'` | Output size: **1080** = 1080×1920 (default); **720** = 720×1280; **light** = 406×720 (smallest). |
 | `opts.smart` | boolean | Enable smart (dynamic) crop (default: `false` = static centered crop) |
 | `opts.smartSampleEvery` | number | Seconds between analysis samples (default: `0.25`) |
 | `opts.smartTwoShot` | boolean | When 2+ people are present, keep both in-frame if possible (default: `true`) |
@@ -133,7 +134,7 @@ await engine.cropTo916('input.mp4', 'vertical_podcast.mp4', {
 // Python-backed AutoCrop-vertical (exact behavior, recommended for advanced use)
 await engine.cropTo916AutoCropVertical('input.mp4', 'vertical_autocrop.mp4', {
   ratio: '9:16',       // same as --ratio
-  quality: 'balanced', // 'fast' | 'balanced' | 'high'
+  quality: 'balanced', // 'fast' | 'balanced' | 'high' | 'max'
   encoder: 'auto',     // 'auto' | 'hw' | specific encoder name
   // frameSkip: 0,
   // downscale: 0,
@@ -381,7 +382,7 @@ Presets define aspect ratio, resolution, transition, and codec hints. Use **pres
 | YouTube Shorts       | `youtubeShort`   | 9:16, 1080×1920, fade, subtitles/watermark flags |
 | TikTok               | `tiktok`         | 9:16, 1080×1920, fade |
 | Instagram Reels      | `instagramReels` | 9:16, 1080×1920, dissolve |
-| Shorts (720p)        | `shorts`         | 9:16, 720×1280, baseline profile |
+| Shorts (default)     | `shorts`         | 9:16, 1080×1920 (or 720 / light via resolution), baseline profile |
 
 **Example**
 
@@ -420,13 +421,14 @@ type CropMode = 'static' | 'smart' | 'autocrop';
 
 interface ComposeMediaOptions {
   cropMode?: CropMode;              // defaults to 'smart'
-  quality?: 'fast'|'balanced'|'high'; // encoder quality; defaults to 'high' in composeShorts
+  quality?: 'fast'|'balanced'|'high'|'max'; // encoder quality; defaults to 'high' in composeShorts
   slices?: Array<{ start: number|string; end: number|string; transition?: any }>;
   preset?: 'youtubeShort' | 'tiktok' | 'instagramReels' | 'shorts';
   transition?: string | { type: string; duration: number };
+  transitionDummyHold?: number;     // seconds of frozen frame at each cut for smoother transitions (e.g. 1)
   subtitles?: { srtPath: string };
   music?: { musicPath: string };
-  autocrop?: object;                // extra options for cropTo916AutoCropVertical (ratio, quality, encoder, etc.)
+  autocrop?: object;                // extra options for cropTo916AutoCropVertical (ratio, quality, encoder, encodeWithFramecraft, etc.)
   onProgress?: (p: object) => void;
 }
 ```
@@ -523,13 +525,13 @@ On completion, the executor emits a final `onProgress({ percent: 100 })` so the 
 
 | Method | Description |
 |--------|-------------|
-| `cropTo916(inputPath, outputPath, opts?)` | Crop to 720×1280 vertical (9:16). |
+| `cropTo916(inputPath, outputPath, opts?)` | Crop to 9:16 vertical; default **1080×1920**; `resolution='720'` or `'light'` (406×720) for smaller. |
 | `slice(inputPath, outputPath, { start, end }, opts?)` | Extract one segment; start/end in seconds or time string. |
 | `addSubtitles(inputPath, outputPath, srtPath, opts?)` | Burn SRT; optional ASS style options. |
 | `extractThumbnail(inputPath, outputPath, time?)` | Single frame to image (.jpg / .png). |
 | `addBackgroundMusic(inputPath, outputPath, musicPath, opts?)` | Mix video audio with music. |
 | `extractAudioOnly(inputPath, outputPath, opts?)` | Audio only → .m4a (AAC) or .mp3. |
-| `slicesWithTransitions(inputPath, outputPath, { slices, transition?, preset? }, opts?)` | Multiple slices joined with xfade/acrossfade. |
+| `slicesWithTransitions(inputPath, outputPath, { slices, transition?, preset?, transitionDummyHold? }, opts?)` | Multiple slices joined with xfade/acrossfade. **transitionDummyHold** (e.g. 1): seconds of frozen frame at each boundary so the transition runs over the hold instead of the live cut. |
 | `compose(inputPath, outputPath, pipeline?, opts?)` | Run preset `'shorts'` or pipeline array. |
 
 **Common `opts`:** `onProgress: (progress) => {}`.
@@ -552,7 +554,7 @@ const {
 
 // Build -vf style filter strings (no execution)
 cropTo916Filter(1920, 1080);
-// => "crop=607:1080:656:0,scale=720:1280"
+// => "crop=607:1080:656:0,scale=1080:1920"
 
 subtitleFilter('/path/to/subs.srt', { fontSize: 24 });
 // => "subtitles='...':force_style='FontSize=24'"
@@ -607,11 +609,33 @@ What this does:
 - Clones `Autocrop-vertical` into `<py-dir>/autocrop-vertical` (if not already present).
 - Creates a virtualenv in `autocrop-vertical/.venv`.
 - Upgrades pip, pins `numpy<2`, and installs `requirements.txt`.
+- **Applies a small patch** to `main.py` to add `--plan-output` (used by `encodeWithFramecraft`; see below).
 - Writes `.autocrop-config.json` in `py-dir` with:
   - `pythonDir` — path to the AutoCrop-vertical repo.
   - `pythonCommand` — path to the venv’s Python binary.
 
 After this, you can call `cropTo916AutoCropVertical` without passing Python paths explicitly.
+
+### Plan-only then encode in Node (better quality)
+
+By default, AutoCrop-vertical does scene detection, builds a crop plan, then encodes the video in Python. If you’ve already encoded once (e.g. a highlight from `composeShorts`), running AutoCrop on that file means **double encoding**, which can reduce quality.
+
+You can avoid that by using **plan-only + Node encode**: AutoCrop runs with `--plan-only` and writes a JSON plan; `ffmpeg-framecraft` then does a **single encode** with FFmpeg using that plan. Result: same crop decisions as AutoCrop, but one encode pass and your chosen quality preset.
+
+Set **`encodeWithFramecraft: true`** in the options passed to `cropTo916AutoCropVertical` (or inside `autocrop` when using `composeShorts`):
+
+```javascript
+await engine.cropTo916AutoCropVertical('input.mp4', 'vertical.mp4', {
+  ratio: '9:16',
+  quality: 'high',           // or 'max' for best quality (CRF 15, veryslow)
+  encodeWithFramecraft: true, // use plan-only + Node encode (single pass)
+  // crf: 14, preset: 'veryslow',  // optional overrides for even higher quality
+});
+```
+
+- **Requires** the setup script to have been run so that `main.py` is patched with `--plan-output`. If the plan file is not written, the engine throws a clear error.
+- **Existing behavior is unchanged** when `encodeWithFramecraft` is omitted or false: AutoCrop-vertical encodes the video as before.
+- **For maximum quality:** use `quality: 'max'` (CRF 15, veryslow), or pass `crf: 14`, `preset: 'veryslow'` to override. Expect larger files and slower encodes.
 
 ### Using AutoCrop-vertical from Node
 
@@ -624,8 +648,10 @@ await engine.cropTo916AutoCropVertical('input.mp4', 'vertical_autocrop.mp4', {
   // pythonDir: '/custom/path/to/autocrop-vertical',
   // pythonCommand: '/custom/path/to/python',
   ratio: '9:16',        // maps to --ratio
-  quality: 'balanced',  // 'fast' | 'balanced' | 'high'
+  quality: 'balanced',  // 'fast' | 'balanced' | 'high' | 'max'
   encoder: 'auto',      // 'auto' | 'hw' | explicit encoder name
+  // encodeWithFramecraft: true,  // plan-only + Node encode (single pass, better quality; requires setup patch)
+  // crf: 16, preset: 'slower',   // optional overrides (Node encode path)
   // frameSkip: 0,
   // downscale: 0,
   // planOnly: true,
